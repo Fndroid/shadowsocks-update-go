@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
@@ -74,43 +75,43 @@ type SSGui struct {
 	UseOnlinePac   bool        `json:"useOnlinePac"`
 }
 
-// ReadConf read update.json
-func ReadConf() Conf {
+// readConf read update.json
+func readConf() (Conf, error) {
 	cb, err := ioutil.ReadFile("update.json")
 	if err != nil {
-		fmt.Println(err)
+		return Conf{}, err
 	}
 	var conf Conf
 	json.Unmarshal(cb, &conf)
-	return conf
+	return conf, nil
 }
 
-// ReadSSGui read gui json
-func ReadSSGui() SSGui {
+// readSSGui read gui json
+func readSSGui() (SSGui, error) {
 	cb, err := ioutil.ReadFile("gui-config.json")
 	if err != nil {
-		fmt.Println(err)
+		return SSGui{}, err
 	}
 	var gui SSGui
 	json.Unmarshal(cb, &gui)
-	return gui
+	return gui, nil
 }
 
-// SurgeFromConf match surge urls
-func SurgeFromConf(conf string) []string {
+// surgeFromConf match surge urls
+func surgeFromConf(conf string) ([]string, error) {
 	re, err := regexp.Compile("\\[Proxy\\]([\\s\\S]*?)\\[Proxy Group\\]")
-	if err == nil {
-		submatch := re.FindSubmatch([]byte(conf))
-		if len(submatch) == 2 {
-			return strings.Split(string(submatch[1]), "\n")
-		}
-		return nil
+	if err != nil {
+		return []string{}, err
 	}
-	return nil
+	submatch := re.FindSubmatch([]byte(conf))
+	if len(submatch) == 2 {
+		return strings.Split(string(submatch[1]), "\n"), nil
+	}
+	return []string{}, errors.New("could not match [Proxy] in profile") 
 }
 
-// Surge2SS convert surge style url to ss-gui format
-func Surge2SS(surge string) Server {
+// surge2SS convert surge style url to ss-gui format
+func surge2SS(surge string) Server {
 	regex, _ := regexp.Compile("(.*?)\\s*=\\s*custom,(.*?),(.*?),(.*?),(.*?),")
 	obfsRegex, _ := regexp.Compile("obfs-host\\s*=\\s*(.*?)(?:,|$)")
 	obfsTypeRegex, _ := regexp.Compile("obfs\\s*=\\s*(.*?)(?:,|$)")
@@ -144,34 +145,46 @@ type Result struct {
 }
 
 func main() {
-	conf := ReadConf()
-	gui := ReadSSGui()
+	conf, err := readConf()
+	if err != nil {
+		fmt.Printf("无法读取update.json，错误：%s", err.Error())
+		return
+	}
+	gui, err := readSSGui()
+	if err != nil {
+		fmt.Printf("无法读取gui-config.json，错误： %s", err.Error())
+		return
+	}
+
 	providers := conf.Providers
 	fmt.Println(fmt.Sprintf("成功读取到%d个托管配置，开始下载...", len(providers)))
 	filters := conf.Filter
 	fmt.Println(fmt.Sprintf("关键字过滤：%s", strings.Join(filters, " | ")))
 	var result Result
 	var remotes []string
+	client := &http.Client{}
 	var wg sync.WaitGroup
 	wg.Add(len(providers))
 	for i := 0; i < len(providers); i++ {
 		go func(url string) {
 			defer wg.Done()
-			client := &http.Client{}
 			request, err := http.NewRequest("GET", url, nil)
 			request.Header.Add("User-Agent", "Surge/1166 CFNetwork/955.1.2 Darwin/18.0.0")
 			if err != nil {
 				fmt.Println(err)
+				return
 			}
 			resp, err := client.Do(request)
 			if err != nil {
 				fmt.Println("获取托管失败", err)
 				result.Network = append(result.Network, url)
+				return
 			}
 			defer resp.Body.Close()
 			body, err := ioutil.ReadAll(resp.Body)
 			if err != nil {
 				fmt.Println(err)
+				return
 			}
 			remotes = append(remotes, string(body))
 		}(providers[i])
@@ -179,14 +192,18 @@ func main() {
 	wg.Wait()
 	var servers []Server
 	for k := 0; k < len(remotes); k++ {
-		urls := SurgeFromConf(remotes[k])
+		urls, err := surgeFromConf(remotes[k])
+		if err != nil {
+			fmt.Printf("无法获取[Proxy]内容，错误：%s", err.Error())
+			continue
+		}
 		if urls == nil {
 			result.Fromat = append(result.Fromat, providers[k])
 			continue
 		}
 		result.Success = append(result.Success, providers[k])
 		for i := 0; i < len(urls); i++ {
-			res := Surge2SS(urls[i])
+			res := surge2SS(urls[i])
 			if res.Remarks != "" {
 				if len(filters) <= 0 || filters == nil {
 					servers = append(servers, res)
